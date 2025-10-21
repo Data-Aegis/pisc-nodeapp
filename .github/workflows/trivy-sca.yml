@@ -104,7 +104,6 @@ jobs:
         if: ${{ inputs['sarif-format'] == 'template' }}
         id: trivy-sca-template
         uses: aquasecurity/trivy-action@0.16.0
-        continue-on-error: true
         with:
           scan-type: fs
           scan-ref: ${{ inputs['scan-ref'] }}
@@ -116,13 +115,12 @@ jobs:
           severity: ${{ inputs.severity }}
           vuln-type: ${{ inputs['vuln-type'] }}
           scanners: ${{ inputs.scanners }}
-          exit-code: ${{ inputs['exit-on-vulnerability'] && '1' || '0' }}
+          exit-code: 0
 
       - name: Trivy SCA (SARIF nativo)
         if: ${{ inputs['sarif-format'] != 'template' }}
         id: trivy-sca
         uses: aquasecurity/trivy-action@0.16.0
-        continue-on-error: true
         with:
           scan-type: fs
           scan-ref: ${{ inputs['scan-ref'] }}
@@ -133,7 +131,7 @@ jobs:
           severity: ${{ inputs.severity }}
           vuln-type: ${{ inputs['vuln-type'] }}
           scanners: ${{ inputs.scanners }}
-          exit-code: ${{ inputs['exit-on-vulnerability'] && '1' || '0' }}
+          exit-code: 0
 
       - name: Trivy SCA (Tabela)
         if: ${{ inputs['publish-summary'] || inputs['pr-report'] }}
@@ -196,6 +194,12 @@ jobs:
         env:
           SUMMARY_TITLE: ${{ inputs['summary-title'] }}
 
+      - name: Avaliar vulnerabilidades
+        id: analyze-findings
+        run: |
+          findings=$(jq '[.runs[].results[]] | length' "${TRIVY_RESULTS_FILE}")
+          echo "count=$findings" >> "$GITHUB_OUTPUT"
+
       - name: Comentário no PR
         if: ${{ always() && inputs['pr-report'] && github.event_name == 'pull_request' }}
         uses: domstolene/trivy-pr-report@v1
@@ -204,8 +208,8 @@ jobs:
           trivy_report: ${{ env.TRIVY_TABLE_FILE }}
           fail_on_severity: ${{ inputs['fail-on-severity'] }}
 
-      # - name: Falhar se vulnerabilidades encontradas
-      #   if: ${{ inputs['exit-on-vulnerability'] && (steps.trivy-sca-template.outcome == 'failure' || steps.trivy-sca.outcome == 'failure') }}
-      #   run: |
-      #     echo "Trivy encontrou vulnerabilidades com severidade configurada."
-      #     exit 1
+      - name: Falhar se vulnerabilidades encontradas
+        if: ${{ inputs['exit-on-vulnerability'] && steps.analyze-findings.outputs.count != '0' }}
+        run: |
+          echo "Trivy encontrou vulnerabilidades com severidade configurada."
+          exit 1

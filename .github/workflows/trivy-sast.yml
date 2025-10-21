@@ -87,7 +87,6 @@ jobs:
         if: ${{ inputs['output-format'] == 'sarif-template' }}
         id: trivy-sast-template
         uses: aquasecurity/trivy-action@0.16.0
-        continue-on-error: true
         with:
           scan-type: fs
           scan-ref: ${{ inputs['scan-ref'] }}
@@ -98,14 +97,13 @@ jobs:
           vuln-type: ${{ inputs['vuln-type'] }}
           ignore-unfixed: ${{ inputs['ignore-unfixed'] && 'true' || 'false' }}
           severity: ${{ inputs.severity }}
-          exit-code: ${{ inputs['exit-on-vulnerability'] && '1' || '0' }}
+          exit-code: 0
           hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
 
       - name: Trivy SAST
         if: ${{ inputs['output-format'] != 'sarif-template' }}
         id: trivy-sast
         uses: aquasecurity/trivy-action@0.16.0
-        continue-on-error: true
         with:
           scan-type: fs
           scan-ref: ${{ inputs['scan-ref'] }}
@@ -115,7 +113,7 @@ jobs:
           vuln-type: ${{ inputs['vuln-type'] }}
           ignore-unfixed: ${{ inputs['ignore-unfixed'] && 'true' || 'false' }}
           severity: ${{ inputs.severity }}
-          exit-code: ${{ inputs['exit-on-vulnerability'] && '1' || '0' }}
+          exit-code: 0
           hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
 
       - name: Trivy SAST (Tabela para PR)
@@ -161,6 +159,20 @@ jobs:
             fi
           fi
 
+      - name: Avaliar vulnerabilidades
+        id: analyze-findings
+        run: |
+          file="${TRIVY_RESULTS_FILE}"
+          findings=0
+          if [[ "$file" == *.sarif ]]; then
+            findings=$(jq '[.runs[].results[]] | length' "$file")
+          elif [[ "$file" == *.json ]]; then
+            findings=$(jq '[.Results[]?.Vulnerabilities[]?] | length' "$file")
+          else
+            findings=$(grep -E "CRITICAL|HIGH|MEDIUM|LOW" -c "$file" || true)
+          fi
+          echo "count=$findings" >> "$GITHUB_OUTPUT"
+
       - name: Comentário no PR
         if: ${{ always() && inputs['pr-report'] && github.event_name == 'pull_request' }}
         uses: domstolene/trivy-pr-report@v1
@@ -169,8 +181,8 @@ jobs:
           trivy_report: ${{ inputs['output-format'] == 'table' && env.TRIVY_RESULTS_FILE || env.TRIVY_PR_REPORT_FILE }}
           fail_on_severity: ${{ inputs['fail-on-severity'] }}
 
-      # - name: Falhar se vulnerabilidades encontradas
-      #   if: ${{ inputs['exit-on-vulnerability'] && (steps.trivy-sast-template.outcome == 'failure' || steps.trivy-sast.outcome == 'failure') }}
-      #   run: |
-      #     echo "Trivy encontrou vulnerabilidades com severidade configurada."
-      #     exit 1
+      - name: Falhar se vulnerabilidades encontradas
+        if: ${{ inputs['exit-on-vulnerability'] && steps.analyze-findings.outputs.count != '0' }}
+        run: |
+          echo "Trivy encontrou vulnerabilidades com severidade configurada."
+          exit 1
