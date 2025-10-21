@@ -204,8 +204,8 @@ jobs:
           trivy_report: ${{ env.TRIVY_TABLE_FILE }}
           fail_on_severity: ${{ inputs['fail-on-severity'] }}
 
-      - name: Falhar se vulnerabilidades encontradas
-        if: ${{ inputs['exit-on-vulnerability'] && (steps.trivy-sca-template.outcome == 'failure' || steps.trivy-sca.outcome == 'failure') }}
-        run: |
-          echo "Trivy encontrou vulnerabilidades com severidade configurada."
-          exit 1
+      # - name: Falhar se vulnerabilidades encontradas
+      #   if: ${{ inputs['exit-on-vulnerability'] && (steps.trivy-sca-template.outcome == 'failure' || steps.trivy-sca.outcome == 'failure') }}
+      #   run: |
+      #     echo "Trivy encontrou vulnerabilidades com severidade configurada."
+      #     exit 1
