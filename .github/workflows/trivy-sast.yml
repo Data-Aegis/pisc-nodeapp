@@ -1,0 +1,168 @@
+name: trivy-sast
+
+on:
+  workflow_call:
+    inputs:
+      scan-ref:
+        description: Caminho alvo do scan.
+        type: string
+        default: .
+      severity:
+        description: Severidades a serem consideradas.
+        type: string
+        default: CRITICAL,HIGH
+      vuln-type:
+        description: Tipos de vulnerabilidade (os,library).
+        type: string
+        default: library
+      scanners:
+        description: Scanners habilitados (vuln,secret,misconfig).
+        type: string
+        default: vuln,secret,misconfig
+      ignore-unfixed:
+        description: Ignorar vulnerabilidades sem correção.
+        type: boolean
+        default: true
+      exit-on-vulnerability:
+        description: Falhar o job ao encontrar vulnerabilidade.
+        type: boolean
+        default: true
+      output-format:
+        description: Formato do relatório (sarif, sarif-template, json, table).
+        type: string
+        default: sarif
+      hide-progress:
+        description: Ocultar barra de progresso.
+        type: boolean
+        default: true
+      upload-sarif:
+        description: Publicar SARIF na aba Security.
+        type: boolean
+        default: true
+      publish-summary:
+        description: Publicar resumo no GITHUB_STEP_SUMMARY.
+        type: boolean
+        default: true
+      pr-report:
+        description: Comentar resultado no PR.
+        type: boolean
+        default: false
+      fail-on-severity:
+        description: Severidades que geram falha no PR report.
+        type: string
+        default: CRITICAL,HIGH
+    secrets:
+      github-token:
+        required: false
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  trivy-sast:
+    name: Trivy SAST
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    env:
+      TRIVY_RESULTS_FILE: ${{ (inputs['output-format'] == 'sarif-template' || inputs['output-format'] == 'sarif') && 'trivy-sast.sarif' || inputs['output-format'] == 'json' && 'trivy-sast.json' || 'trivy-sast.txt' }}
+      TRIVY_PR_REPORT_FILE: ${{ inputs['output-format'] == 'table' && 'trivy-sast.txt' || 'trivy-sast-pr.txt' }}
+      GITHUB_TOKEN: ${{ secrets.github-token || github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Trivy database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ hashFiles('**/package-lock.json', '**/yarn.lock', '**/pnpm-lock.yaml') }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Trivy SAST (template)
+        if: ${{ inputs['output-format'] == 'sarif-template' }}
+        id: trivy-sast-template
+        uses: aquasecurity/trivy-action@0.16.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs['scan-ref'] }}
+          format: template
+          template: "@/contrib/sarif.tpl"
+          output: ${{ env.TRIVY_RESULTS_FILE }}
+          scanners: ${{ inputs.scanners }}
+          vuln-type: ${{ inputs['vuln-type'] }}
+          ignore-unfixed: ${{ inputs['ignore-unfixed'] && 'true' || 'false' }}
+          severity: ${{ inputs.severity }}
+          exit-code: ${{ inputs['exit-on-vulnerability'] && '1' || '0' }}
+          hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
+
+      - name: Trivy SAST
+        if: ${{ inputs['output-format'] != 'sarif-template' }}
+        id: trivy-sast
+        uses: aquasecurity/trivy-action@0.16.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs['scan-ref'] }}
+          format: ${{ inputs['output-format'] }}
+          output: ${{ env.TRIVY_RESULTS_FILE }}
+          scanners: ${{ inputs.scanners }}
+          vuln-type: ${{ inputs['vuln-type'] }}
+          ignore-unfixed: ${{ inputs['ignore-unfixed'] && 'true' || 'false' }}
+          severity: ${{ inputs.severity }}
+          exit-code: ${{ inputs['exit-on-vulnerability'] && '1' || '0' }}
+          hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
+
+      - name: Trivy SAST (Tabela para PR)
+        if: ${{ inputs['pr-report'] && inputs['output-format'] != 'table' }}
+        uses: aquasecurity/trivy-action@0.16.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs['scan-ref'] }}
+          format: table
+          output: ${{ env.TRIVY_PR_REPORT_FILE }}
+          scanners: ${{ inputs.scanners }}
+          vuln-type: ${{ inputs['vuln-type'] }}
+          ignore-unfixed: ${{ inputs['ignore-unfixed'] && 'true' || 'false' }}
+          severity: ${{ inputs.severity }}
+          hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
+          exit-code: 0
+
+      - name: Upload SARIF
+        if: ${{ inputs['upload-sarif'] && (inputs['output-format'] == 'sarif' || inputs['output-format'] == 'sarif-template') }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ env.TRIVY_RESULTS_FILE }}
+
+      - name: Publicar resumo
+        if: ${{ inputs['publish-summary'] }}
+        run: |
+          if [[ -f "${TRIVY_RESULTS_FILE}" ]]; then
+            echo "### Trivy SAST" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "${TRIVY_RESULTS_FILE}" == *.sarif ]]; then
+              findings=$(jq '[.runs[].results[] | {ruleId, severity: (.properties.severity // "UNKNOWN"), file: (.locations[0].physicalLocation.artifactLocation.uri // "N/A")}]' "${TRIVY_RESULTS_FILE}")
+              if [[ "${findings}" == "[]" ]]; then
+                echo "- Nenhuma vulnerabilidade encontrada." >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "- Vulnerabilidades identificadas:" >> "$GITHUB_STEP_SUMMARY"
+                echo '```json' >> "$GITHUB_STEP_SUMMARY"
+                echo "${findings}" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
+              fi
+            else
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              cat "${TRIVY_RESULTS_FILE}" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+      - name: Comentário no PR
+        if: ${{ inputs['pr-report'] && github.event_name == 'pull_request' }}
+        uses: domstolene/trivy-pr-report@v1
+        with:
+          github_token: ${{ secrets.github-token || github.token }}
+          trivy_report: ${{ inputs['output-format'] == 'table' && env.TRIVY_RESULTS_FILE || env.TRIVY_PR_REPORT_FILE }}
+          fail_on_severity: ${{ inputs['fail-on-severity'] }}

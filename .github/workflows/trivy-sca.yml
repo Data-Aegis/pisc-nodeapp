@@ -1,0 +1,203 @@
+name: trivy-sca
+
+on:
+  workflow_call:
+    inputs:
+      scan-ref:
+        description: Caminho alvo do scan.
+        type: string
+        default: .
+      severity:
+        description: Severidades a serem contabilizadas.
+        type: string
+        default: CRITICAL,HIGH
+      vuln-type:
+        description: Tipos de vulnerabilidades (os,library).
+        type: string
+        default: os,library
+      scanners:
+        description: Scanners habilitados (vuln,secret,misconfig,license).
+        type: string
+        default: vuln,secret,misconfig,license
+      ignore-unfixed:
+        description: Ignorar vulnerabilidades sem correção.
+        type: boolean
+        default: true
+      exit-on-vulnerability:
+        description: Falhar o job se encontrar vulnerabilidades.
+        type: boolean
+        default: true
+      sarif-format:
+        description: Seleciona sarif nativo ou template (native|template).
+        type: string
+        default: native
+      upload-sarif:
+        description: Enviar SARIF para a aba Security.
+        type: boolean
+        default: true
+      include-sbom:
+        description: Gerar SBOM no formato GitHub.
+        type: boolean
+        default: true
+      sbom-output:
+        description: Nome do arquivo de SBOM.
+        type: string
+        default: dependency-results.sbom.json
+      publish-summary:
+        description: Publicar resumo no GITHUB_STEP_SUMMARY.
+        type: boolean
+        default: true
+      summary-title:
+        description: Título do bloco de resumo.
+        type: string
+        default: Trivy SCA
+      pr-report:
+        description: Comentar vulnerabilidades no PR.
+        type: boolean
+        default: false
+      fail-on-severity:
+        description: Severidades tratadas como falhas no PR report.
+        type: string
+        default: CRITICAL,HIGH
+      upload-sbom-artifact:
+        description: Publicar SBOM como artefato.
+        type: boolean
+        default: true
+      hide-progress:
+        description: Ocultar barra de progresso.
+        type: boolean
+        default: true
+    secrets:
+      github-token:
+        required: false
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  trivy-sca:
+    name: Trivy SCA
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      security-events: write
+      actions: read
+    env:
+      TRIVY_RESULTS_FILE: trivy-sca.sarif
+      TRIVY_TABLE_FILE: trivy-sca.txt
+      SBOM_FILE: ${{ inputs['sbom-output'] }}
+      GITHUB_TOKEN: ${{ secrets.github-token || github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Trivy database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ hashFiles('**/package-lock.json', '**/yarn.lock', '**/pnpm-lock.yaml') }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Trivy SCA (SARIF template)
+        if: ${{ inputs['sarif-format'] == 'template' }}
+        id: trivy-sca-template
+        uses: aquasecurity/trivy-action@0.16.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs['scan-ref'] }}
+          format: template
+          template: "@/contrib/sarif.tpl"
+          output: ${{ env.TRIVY_RESULTS_FILE }}
+          hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
+          ignore-unfixed: ${{ inputs['ignore-unfixed'] && 'true' || 'false' }}
+          severity: ${{ inputs.severity }}
+          vuln-type: ${{ inputs['vuln-type'] }}
+          scanners: ${{ inputs.scanners }}
+          exit-code: ${{ inputs['exit-on-vulnerability'] && '1' || '0' }}
+
+      - name: Trivy SCA (SARIF nativo)
+        if: ${{ inputs['sarif-format'] != 'template' }}
+        id: trivy-sca
+        uses: aquasecurity/trivy-action@0.16.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs['scan-ref'] }}
+          format: sarif
+          output: ${{ env.TRIVY_RESULTS_FILE }}
+          hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
+          ignore-unfixed: ${{ inputs['ignore-unfixed'] && 'true' || 'false' }}
+          severity: ${{ inputs.severity }}
+          vuln-type: ${{ inputs['vuln-type'] }}
+          scanners: ${{ inputs.scanners }}
+          exit-code: ${{ inputs['exit-on-vulnerability'] && '1' || '0' }}
+
+      - name: Trivy SCA (Tabela)
+        if: ${{ inputs['publish-summary'] || inputs['pr-report'] }}
+        uses: aquasecurity/trivy-action@0.16.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs['scan-ref'] }}
+          format: table
+          output: ${{ env.TRIVY_TABLE_FILE }}
+          hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
+          ignore-unfixed: ${{ inputs['ignore-unfixed'] && 'true' || 'false' }}
+          severity: ${{ inputs.severity }}
+          vuln-type: ${{ inputs['vuln-type'] }}
+          scanners: ${{ inputs.scanners }}
+          exit-code: 0
+
+      - name: Upload SARIF
+        if: ${{ inputs['upload-sarif'] }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ env.TRIVY_RESULTS_FILE }}
+
+      - name: Gerar SBOM (GitHub Dependency Submission)
+        if: ${{ inputs['include-sbom'] }}
+        uses: aquasecurity/trivy-action@0.16.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs['scan-ref'] }}
+          format: github
+          output: ${{ env.SBOM_FILE }}
+          hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
+          github-pat: ${{ secrets.github-token || github.token }}
+
+      - name: Publicar SBOM como artefato
+        if: ${{ inputs['include-sbom'] && inputs['upload-sbom-artifact'] }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: ${{ env.SBOM_FILE }}
+          retention-days: 7
+
+      - name: Publicar resumo
+        if: ${{ inputs['publish-summary'] }}
+        run: |
+          if [[ -s "${TRIVY_TABLE_FILE}" ]]; then
+            {
+              echo "### ${SUMMARY_TITLE}"
+              echo ""
+              echo "<details><summary>Relatório completo</summary>"
+              echo ""
+              echo '```text'
+              cat "${TRIVY_TABLE_FILE}"
+              echo '```'
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ${SUMMARY_TITLE}" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Nenhuma vulnerabilidade encontrada." >> "$GITHUB_STEP_SUMMARY"
+          fi
+        env:
+          SUMMARY_TITLE: ${{ inputs['summary-title'] }}
+
+      - name: Comentário no PR
+        if: ${{ inputs['pr-report'] && github.event_name == 'pull_request' }}
+        uses: domstolene/trivy-pr-report@v1
+        with:
+          github_token: ${{ secrets.github-token || github.token }}
+          trivy_report: ${{ env.TRIVY_TABLE_FILE }}
+          fail_on_severity: ${{ inputs['fail-on-severity'] }}

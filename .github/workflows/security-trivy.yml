@@ -1,0 +1,116 @@
+name: security-trivy
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      run-sast:
+        description: Executar SAST
+        type: boolean
+        default: true
+      sast-output-format:
+        description: Formato de saída do SAST
+        type: choice
+        default: sarif
+        options:
+          - sarif
+          - sarif-template
+          - json
+          - table
+      sast-ignore-unfixed:
+        description: Ignorar vulnerabilidades sem correção (SAST)
+        type: boolean
+        default: true
+      sast-pr-report:
+        description: Comentar resultado do SAST no PR
+        type: boolean
+        default: false
+      run-sca:
+        description: Executar SCA
+        type: boolean
+        default: true
+      include-sbom:
+        description: Gerar SBOM durante o SCA
+        type: boolean
+        default: true
+      sca-sarif-format:
+        description: Formato do SARIF (nativo ou template)
+        type: choice
+        default: native
+        options:
+          - native
+          - template
+      sca-ignore-unfixed:
+        description: Ignorar vulnerabilidades sem correção (SCA)
+        type: boolean
+        default: true
+      sca-pr-report:
+        description: Comentar resultado do SCA no PR
+        type: boolean
+        default: true
+      fail-on-severity:
+        description: Severidades que falham o build
+        type: choice
+        default: CRITICAL,HIGH
+        options:
+          - CRITICAL
+          - CRITICAL,HIGH
+          - CRITICAL,HIGH,MEDIUM
+          - CRITICAL,HIGH,MEDIUM,LOW
+
+permissions:
+  contents: read
+  security-events: write
+
+env:
+  RUN_SAST_DEFAULT: "true"
+  RUN_SCA_DEFAULT: "true"
+  INCLUDE_SBOM_DEFAULT: "true"
+  FAIL_ON_SEVERITY_DEFAULT: "CRITICAL,HIGH"
+  SAST_OUTPUT_FORMAT_DEFAULT: "sarif"
+  SAST_IGNORE_UNFIXED_DEFAULT: "true"
+  SCA_IGNORE_UNFIXED_DEFAULT: "true"
+  SCA_SARIF_FORMAT_DEFAULT: "native"
+
+jobs:
+  sast:
+    name: SAST
+    if: ${{ github.event_name == 'workflow_dispatch' ? inputs.run-sast : env.RUN_SAST_DEFAULT == 'true' }}
+    uses: ./.github/workflows/trivy-sast.yml
+    with:
+      scan-ref: .
+      severity: ${{ github.event_name == 'workflow_dispatch' && inputs['fail-on-severity'] || env.FAIL_ON_SEVERITY_DEFAULT }}
+      vuln-type: library
+      scanners: vuln,secret,misconfig
+      ignore-unfixed: ${{ github.event_name == 'workflow_dispatch' ? inputs['sast-ignore-unfixed'] : env.SAST_IGNORE_UNFIXED_DEFAULT == 'true' }}
+      exit-on-vulnerability: true
+      output-format: ${{ github.event_name == 'workflow_dispatch' && inputs['sast-output-format'] || env.SAST_OUTPUT_FORMAT_DEFAULT }}
+      upload-sarif: ${{ github.event_name == 'workflow_dispatch' ? (inputs['sast-output-format'] == 'sarif' || inputs['sast-output-format'] == 'sarif-template') : true }}
+      publish-summary: true
+      pr-report: ${{ github.event_name == 'workflow_dispatch' ? inputs['sast-pr-report'] : false }}
+      fail-on-severity: ${{ github.event_name == 'workflow_dispatch' && inputs['fail-on-severity'] || env.FAIL_ON_SEVERITY_DEFAULT }}
+
+  sca:
+    name: SCA
+    if: ${{ github.event_name == 'workflow_dispatch' ? inputs.run-sca : env.RUN_SCA_DEFAULT == 'true' }}
+    uses: ./.github/workflows/trivy-sca.yml
+    with:
+      scan-ref: .
+      severity: ${{ github.event_name == 'workflow_dispatch' && inputs['fail-on-severity'] || env.FAIL_ON_SEVERITY_DEFAULT }}
+      vuln-type: os,library
+      scanners: vuln,secret,misconfig,license
+      ignore-unfixed: ${{ github.event_name == 'workflow_dispatch' ? inputs['sca-ignore-unfixed'] : env.SCA_IGNORE_UNFIXED_DEFAULT == 'true' }}
+      exit-on-vulnerability: true
+      sarif-format: ${{ github.event_name == 'workflow_dispatch' && inputs['sca-sarif-format'] || env.SCA_SARIF_FORMAT_DEFAULT }}
+      include-sbom: ${{ github.event_name == 'workflow_dispatch' ? inputs['include-sbom'] : env.INCLUDE_SBOM_DEFAULT == 'true' }}
+      upload-sarif: true
+      publish-summary: true
+      pr-report: ${{ github.event_name == 'workflow_dispatch' ? inputs['sca-pr-report'] : true }}
+      fail-on-severity: ${{ github.event_name == 'workflow_dispatch' && inputs['fail-on-severity'] || env.FAIL_ON_SEVERITY_DEFAULT }}
