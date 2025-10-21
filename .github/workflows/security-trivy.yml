@@ -82,7 +82,7 @@ env:
 jobs:
   sast:
     name: SAST
-    if: ${{ github.event_name == 'workflow_dispatch' ? inputs.run-sast : env.RUN_SAST_DEFAULT == 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' ? inputs['run-sast'] : env.RUN_SAST_DEFAULT == 'true' }}
     uses: ./.github/workflows/trivy-sast.yml
     with:
       scan-ref: .
@@ -99,7 +99,7 @@ jobs:
 
   sca:
     name: SCA
-    if: ${{ github.event_name == 'workflow_dispatch' ? inputs.run-sca : env.RUN_SCA_DEFAULT == 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' ? inputs['run-sca'] : env.RUN_SCA_DEFAULT == 'true' }}
     uses: ./.github/workflows/trivy-sca.yml
     with:
       scan-ref: .
