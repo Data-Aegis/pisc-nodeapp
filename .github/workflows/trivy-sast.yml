@@ -143,7 +143,39 @@ jobs:
           if [[ -f "${TRIVY_RESULTS_FILE}" ]]; then
             echo "### Trivy SAST" >> "$GITHUB_STEP_SUMMARY"
             if [[ "${TRIVY_RESULTS_FILE}" == *.sarif ]]; then
-              findings=$(jq '[.runs[].results[] | {ruleId, severity: (.properties.severity // "UNKNOWN"), file: (.locations[0].physicalLocation.artifactLocation.uri // "N/A")}]' "${TRIVY_RESULTS_FILE}")
+              findings=$(jq '
+                def norm($v):
+                  if $v == null or ($v | tostring | length) == 0 then empty
+                  else
+                    (try ($v | tonumber) catch null) as $n
+                    | if $n != null then
+                        if $n >= 9 then "CRITICAL"
+                        elif $n >= 7 then "HIGH"
+                        elif $n >= 4 then "MEDIUM"
+                        elif $n > 0 then "LOW"
+                        else "UNKNOWN"
+                        end
+                      else
+                        ($v | tostring | ascii_upcase)
+                      end
+                  end;
+                def severity($r):
+                  (
+                    [
+                      $r.properties.severity,
+                      $r.rule.properties.severity,
+                      $r.properties["security-severity"],
+                      $r.rule.properties["security-severity"],
+                      ($r.properties.tags[]? | select(test("^severity", "i")) | split(":")[1]?),
+                      ($r.rule.properties.tags[]? | select(test("^severity", "i")) | split(":")[1]?),
+                      $r.level
+                    ]
+                    | map(norm(.))
+                    | map(select(. != null and . != ""))
+                    | .[0]
+                  ) // "UNKNOWN";
+                [.runs[].results[] | {ruleId, severity: severity(.), file: (.locations[0].physicalLocation.artifactLocation.uri // "N/A")}]
+              ' "${TRIVY_RESULTS_FILE}")
               if [[ "${findings}" == "[]" ]]; then
                 echo "- Nenhuma vulnerabilidade encontrada." >> "$GITHUB_STEP_SUMMARY"
               else
