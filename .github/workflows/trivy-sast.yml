@@ -131,6 +131,41 @@ jobs:
           hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
           exit-code: 0
 
+      - name: Trivy SAST (JSON para DefectDojo)
+        uses: aquasecurity/trivy-action@0.16.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs['scan-ref'] }}
+          format: json
+          output: trivy-sast.json
+          scanners: ${{ inputs.scanners }}
+          vuln-type: ${{ inputs['vuln-type'] }}
+          ignore-unfixed: ${{ inputs['ignore-unfixed'] && 'true' || 'false' }}
+          severity: ${{ inputs.severity }}
+          hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
+          exit-code: 0
+
+      - name: Upload Trivy SAST para DefectDojo
+        if: ${{ always() }}
+        env:
+          DEFECTDOJO_TOKEN: 75e7a2b85f58f48ea3eee1c72a28a492d36f6c00
+        run: |
+          if [[ -s trivy-sast.json ]]; then
+            curl -sS -X POST "http://18.212.206.175:8080/api/v2/import-scan/" \
+              -H "Authorization: Token ${DEFECTDOJO_TOKEN}" \
+              -F "scan_type=Trivy Scan" \
+              -F "engagement=1" \
+              -F "lead=1" \
+              -F "active=true" \
+              -F "verified=false" \
+              -F "test_title=Trivy SAST (GitHub Actions)" \
+              -F "minimum_severity=Low" \
+              -F "close_old_findings=false" \
+              -F "file=@trivy-sast.json;type=application/json"
+          else
+            echo "Arquivo trivy-sast.json não encontrado ou vazio; pulando upload."
+          fi
+
       - name: Upload SARIF
         if: ${{ always() && inputs['upload-sarif'] && (inputs['output-format'] == 'sarif' || inputs['output-format'] == 'sarif-template') }}
         uses: github/codeql-action/upload-sarif@v3
