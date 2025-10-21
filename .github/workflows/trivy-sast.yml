@@ -87,6 +87,7 @@ jobs:
         if: ${{ inputs['output-format'] == 'sarif-template' }}
         id: trivy-sast-template
         uses: aquasecurity/trivy-action@0.16.0
+        continue-on-error: true
         with:
           scan-type: fs
           scan-ref: ${{ inputs['scan-ref'] }}
@@ -104,6 +105,7 @@ jobs:
         if: ${{ inputs['output-format'] != 'sarif-template' }}
         id: trivy-sast
         uses: aquasecurity/trivy-action@0.16.0
+        continue-on-error: true
         with:
           scan-type: fs
           scan-ref: ${{ inputs['scan-ref'] }}
@@ -132,13 +134,13 @@ jobs:
           exit-code: 0
 
       - name: Upload SARIF
-        if: ${{ inputs['upload-sarif'] && (inputs['output-format'] == 'sarif' || inputs['output-format'] == 'sarif-template') }}
+        if: ${{ always() && inputs['upload-sarif'] && (inputs['output-format'] == 'sarif' || inputs['output-format'] == 'sarif-template') }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ${{ env.TRIVY_RESULTS_FILE }}
 
       - name: Publicar resumo
-        if: ${{ inputs['publish-summary'] }}
+        if: ${{ always() && inputs['publish-summary'] }}
         run: |
           if [[ -f "${TRIVY_RESULTS_FILE}" ]]; then
             echo "### Trivy SAST" >> "$GITHUB_STEP_SUMMARY"
@@ -160,9 +162,15 @@ jobs:
           fi
 
       - name: Comentário no PR
-        if: ${{ inputs['pr-report'] && github.event_name == 'pull_request' }}
+        if: ${{ always() && inputs['pr-report'] && github.event_name == 'pull_request' }}
         uses: domstolene/trivy-pr-report@v1
         with:
           github_token: ${{ secrets.github-token || github.token }}
           trivy_report: ${{ inputs['output-format'] == 'table' && env.TRIVY_RESULTS_FILE || env.TRIVY_PR_REPORT_FILE }}
           fail_on_severity: ${{ inputs['fail-on-severity'] }}
+
+      - name: Falhar se vulnerabilidades encontradas
+        if: ${{ inputs['exit-on-vulnerability'] && (steps.trivy-sast-template.outcome == 'failure' || steps.trivy-sast.outcome == 'failure') }}
+        run: |
+          echo "Trivy encontrou vulnerabilidades com severidade configurada."
+          exit 1

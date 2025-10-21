@@ -104,6 +104,7 @@ jobs:
         if: ${{ inputs['sarif-format'] == 'template' }}
         id: trivy-sca-template
         uses: aquasecurity/trivy-action@0.16.0
+        continue-on-error: true
         with:
           scan-type: fs
           scan-ref: ${{ inputs['scan-ref'] }}
@@ -121,6 +122,7 @@ jobs:
         if: ${{ inputs['sarif-format'] != 'template' }}
         id: trivy-sca
         uses: aquasecurity/trivy-action@0.16.0
+        continue-on-error: true
         with:
           scan-type: fs
           scan-ref: ${{ inputs['scan-ref'] }}
@@ -149,13 +151,13 @@ jobs:
           exit-code: 0
 
       - name: Upload SARIF
-        if: ${{ inputs['upload-sarif'] }}
+        if: ${{ always() && inputs['upload-sarif'] }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ${{ env.TRIVY_RESULTS_FILE }}
 
       - name: Gerar SBOM (GitHub Dependency Submission)
-        if: ${{ inputs['include-sbom'] }}
+        if: ${{ always() && inputs['include-sbom'] }}
         uses: aquasecurity/trivy-action@0.16.0
         with:
           scan-type: fs
@@ -166,7 +168,7 @@ jobs:
           github-pat: ${{ secrets.github-token || github.token }}
 
       - name: Publicar SBOM como artefato
-        if: ${{ inputs['include-sbom'] && inputs['upload-sbom-artifact'] }}
+        if: ${{ always() && inputs['include-sbom'] && inputs['upload-sbom-artifact'] }}
         uses: actions/upload-artifact@v4
         with:
           name: sbom
@@ -174,7 +176,7 @@ jobs:
           retention-days: 7
 
       - name: Publicar resumo
-        if: ${{ inputs['publish-summary'] }}
+        if: ${{ always() && inputs['publish-summary'] }}
         run: |
           if [[ -s "${TRIVY_TABLE_FILE}" ]]; then
             {
@@ -195,9 +197,15 @@ jobs:
           SUMMARY_TITLE: ${{ inputs['summary-title'] }}
 
       - name: Comentário no PR
-        if: ${{ inputs['pr-report'] && github.event_name == 'pull_request' }}
+        if: ${{ always() && inputs['pr-report'] && github.event_name == 'pull_request' }}
         uses: domstolene/trivy-pr-report@v1
         with:
           github_token: ${{ secrets.github-token || github.token }}
           trivy_report: ${{ env.TRIVY_TABLE_FILE }}
           fail_on_severity: ${{ inputs['fail-on-severity'] }}
+
+      - name: Falhar se vulnerabilidades encontradas
+        if: ${{ inputs['exit-on-vulnerability'] && (steps.trivy-sca-template.outcome == 'failure' || steps.trivy-sca.outcome == 'failure') }}
+        run: |
+          echo "Trivy encontrou vulnerabilidades com severidade configurada."
+          exit 1
