@@ -159,8 +159,8 @@ jobs:
           BASE_URL="${DEFECTDOJO_BASE_URL}"
           REPO_FULL="${GITHUB_REPOSITORY}"
           REPO_NAME="${REPO_FULL#*/}"
-          PRODUCT_NAME="${REPO_FULL}"
-          ENGAGEMENT_NAME="CI/CD - ${REPO_NAME}"
+          PRODUCT_NAME="${REPO_NAME}"
+          ENGAGEMENT_NAME="${REPO_NAME}"
           TEST_TITLE="Trivy SAST (GitHub Actions)"
           TARGET_START=$(date -u +"%Y-%m-%d")
           TARGET_END=$(date -u -d "+7 days" +"%Y-%m-%d")
@@ -189,9 +189,8 @@ jobs:
           echo "Buscando engagement '${ENGAGEMENT_NAME}'"
           engagement_resp=$(curl -sS -G "${BASE_URL}/api/v2/engagements/" \
             --data-urlencode "product=${product_id}" \
-            --data-urlencode "name=${ENGAGEMENT_NAME}" \
             -H "${AUTH_HEADER}")
-          engagement_id=$(echo "${engagement_resp}" | jq '.results[] | select(.name == "'"${ENGAGEMENT_NAME}"'") | .id' | head -n 1)
+          engagement_id=$(echo "${engagement_resp}" | jq '.results[] | select(.product == '"${product_id}"' and .name == "'"${ENGAGEMENT_NAME}"'") | .id' | head -n 1)
 
           if [[ -z "${engagement_id}" ]]; then
             echo "Criando engagement '${ENGAGEMENT_NAME}'"
