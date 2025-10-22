@@ -85,8 +85,9 @@ jobs:
       actions: read
     env:
       TRIVY_RESULTS_FILE: trivy-sca.sarif
-      TRIVY_TABLE_FILE: trivy-sca.txt
-      SBOM_FILE: ${{ inputs['sbom-output'] }}
+      TRIVY_JSON_FILE: trivy-sca.json
+      SBOM_SUBMISSION_FILE: ${{ inputs['sbom-output'] }}
+      SBOM_CYCLONEDX_FILE: trivy-sca.cyclonedx.json
       GITHUB_TOKEN: ${{ secrets.github-token || github.token }}
     steps:
       - name: Checkout
@@ -99,23 +100,6 @@ jobs:
           key: trivy-db-${{ runner.os }}-${{ hashFiles('**/package-lock.json', '**/yarn.lock', '**/pnpm-lock.yaml') }}
           restore-keys: |
             trivy-db-${{ runner.os }}-
-
-      - name: Trivy SCA (SARIF template)
-        if: ${{ inputs['sarif-format'] == 'template' }}
-        id: trivy-sca-template
-        uses: aquasecurity/trivy-action@0.16.0
-        with:
-          scan-type: fs
-          scan-ref: ${{ inputs['scan-ref'] }}
-          format: template
-          template: "@/contrib/sarif.tpl"
-          output: ${{ env.TRIVY_RESULTS_FILE }}
-          hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
-          ignore-unfixed: ${{ inputs['ignore-unfixed'] && 'true' || 'false' }}
-          severity: ${{ inputs.severity }}
-          vuln-type: ${{ inputs['vuln-type'] }}
-          scanners: ${{ inputs.scanners }}
-          exit-code: 0
 
       - name: Trivy SCA (SARIF nativo)
         if: ${{ inputs['sarif-format'] != 'template' }}
@@ -133,14 +117,13 @@ jobs:
           scanners: ${{ inputs.scanners }}
           exit-code: 0
 
-      - name: Trivy SCA (Tabela)
-        if: ${{ inputs['publish-summary'] || inputs['pr-report'] }}
+      - name: Trivy SCA (JSON)
         uses: aquasecurity/trivy-action@0.16.0
         with:
           scan-type: fs
           scan-ref: ${{ inputs['scan-ref'] }}
-          format: table
-          output: ${{ env.TRIVY_TABLE_FILE }}
+          format: json
+          output: ${{ env.TRIVY_JSON_FILE }}
           hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
           ignore-unfixed: ${{ inputs['ignore-unfixed'] && 'true' || 'false' }}
           severity: ${{ inputs.severity }}
@@ -161,52 +144,335 @@ jobs:
           scan-type: fs
           scan-ref: ${{ inputs['scan-ref'] }}
           format: github
-          output: ${{ env.SBOM_FILE }}
+          output: ${{ env.SBOM_SUBMISSION_FILE }}
           hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
           github-pat: ${{ secrets.github-token || github.token }}
+
+      - name: Gerar SBOM (CycloneDX JSON)
+        if: ${{ always() && inputs['include-sbom'] }}
+        uses: aquasecurity/trivy-action@0.16.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs['scan-ref'] }}
+          format: cyclonedx
+          output: ${{ env.SBOM_CYCLONEDX_FILE }}
+          hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
+          ignore-unfixed: ${{ inputs['ignore-unfixed'] && 'true' || 'false' }}
+          severity: ${{ inputs.severity }}
+          vuln-type: ${{ inputs['vuln-type'] }}
+          scanners: ${{ inputs.scanners }}
+          exit-code: 0
 
       - name: Publicar SBOM como artefato
         if: ${{ always() && inputs['include-sbom'] && inputs['upload-sbom-artifact'] }}
         uses: actions/upload-artifact@v4
         with:
           name: sbom
-          path: ${{ env.SBOM_FILE }}
+          path: |
+            ${{ env.SBOM_SUBMISSION_FILE }}
+            ${{ env.SBOM_CYCLONEDX_FILE }}
           retention-days: 7
 
-      - name: Publicar resumo
-        if: ${{ always() && inputs['publish-summary'] }}
+      - name: Gerar resumo Trivy (Markdown)
+        if: ${{ always() }}
+        id: sca-markdown
+        env:
+          SUMMARY_TITLE: ${{ inputs['summary-title'] }}
         run: |
-          if [[ -s "${TRIVY_TABLE_FILE}" ]]; then
+          SUMMARY_FILE="trivy-sca-summary.md"
+          if [[ ! -f "${TRIVY_JSON_FILE}" ]]; then
             {
               echo "### ${SUMMARY_TITLE}"
               echo ""
-              echo "<details><summary>Relatório completo</summary>"
-              echo ""
-              echo '```text'
-              cat "${TRIVY_TABLE_FILE}"
-              echo '```'
-              echo "</details>"
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "### ${SUMMARY_TITLE}" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Nenhuma vulnerabilidade encontrada." >> "$GITHUB_STEP_SUMMARY"
+              echo "Relatório JSON não encontrado."
+            } > "$SUMMARY_FILE"
+            exit 0
           fi
+          jq -r --arg summary "$SUMMARY_TITLE" '
+            def sev_score($s):
+              if ($s|ascii_upcase) == "CRITICAL" then 4
+              elif ($s|ascii_upcase) == "HIGH" then 3
+              elif ($s|ascii_upcase) == "MEDIUM" then 2
+              elif ($s|ascii_upcase) == "LOW" then 1
+              else 0 end;
+            def normalize($s): ($s // "UNKNOWN") | ascii_upcase;
+            [
+              .Results[]? | .Vulnerabilities[]?
+              | {
+                  severity: normalize(.Severity),
+                  package: (.PkgName // "n/a"),
+                  version: (.InstalledVersion // "-"),
+                  fixed: (if .FixedVersion then (.FixedVersion | gsub(",\\s*"; "<br>")) else "-" end),
+                  cve: (.VulnerabilityID // "-"),
+                  url: (.PrimaryURL // "https://aquasecurity.github.io/trivy/"),
+                  type: (.PkgIdentifier.PURL // (.PkgName // "n/a"))
+                }
+            ] as $vulns
+            |
+            ($vulns | length) as $total
+            |
+            "### \u200b" + $summary,
+            "",
+            (if $total == 0 then
+              "Nenhuma vulnerabilidade encontrada nas dependências analisadas."
+            else
+              "Total de vulnerabilidades encontradas: \($total)"
+            end),
+            "",
+            (if $total == 0 then empty else
+              (["Severidade | Qtde","-----------|-----"] +
+              ($vulns
+                | group_by(.severity)
+                | map({severity: (.[0].severity), count: length})
+                | sort_by(sev_score(.severity))
+                | reverse
+                | map("\(.severity) | \(.count)")
+              )) | join("\n")
+            end),
+            "",
+            (if $total == 0 then empty else "Principais pacotes afetados:" end),
+            (if $total == 0 then empty else "" end),
+            (if $total == 0 then empty else
+              (["| Severidade | Pacote | Versão instalada | Correção | CVE | Link |",
+                "|-----------|--------|------------------|---------|-----|------|"] +
+               ($vulns
+                 | unique_by(.cve)
+                 | sort_by(sev_score(.severity))
+                 | reverse
+                 | .[0:5]
+                 | map("| \(.severity) | `\(.package)` | \(.version) | \(.fixed) | \(.cve) | [detalhes](\(.url)) |")
+               )) | join("\n")
+            end)
+          ' "${TRIVY_JSON_FILE}" > "$SUMMARY_FILE"
+          echo '' >> "$SUMMARY_FILE"
+
+      - name: Preparar recursos no DefectDojo
+        if: ${{ always() }}
+        id: dojo-setup
+        env:
+          DEFECTDOJO_BASE_URL: http://18.210.28.169:8080
+          DEFECTDOJO_TOKEN: 75e7a2b85f58f48ea3eee1c72a28a492d36f6c00
+          DEFECTDOJO_PRODUCT_TYPE_ID: 1
+        run: |
+          set -euo pipefail
+
+          AUTH_HEADER="Authorization: Token ${DEFECTDOJO_TOKEN}"
+          BASE_URL="${DEFECTDOJO_BASE_URL}"
+          REPO_FULL="${GITHUB_REPOSITORY}"
+          REPO_NAME="${REPO_FULL#*/}"
+          PRODUCT_NAME="${REPO_NAME}"
+          ENGAGEMENT_NAME="${REPO_NAME}"
+          SCA_TEST_TITLE="Trivy SCA (GitHub Actions)"
+          SBOM_TEST_TITLE="Trivy SBOM (CycloneDX)"
+          TARGET_START=$(date -u +"%Y-%m-%d")
+          TARGET_END=$(date -u -d "+7 days" +"%Y-%m-%d")
+
+          product_resp=$(curl -sS -G "${BASE_URL}/api/v2/products/" \
+            --data-urlencode "name=${PRODUCT_NAME}" \
+            -H "${AUTH_HEADER}")
+          product_id=$(echo "${product_resp}" | jq '.results[] | select(.name == "'"${PRODUCT_NAME}"'") | .id' | head -n 1)
+
+          if [[ -z "${product_id}" ]]; then
+            product_payload=$(jq -n \
+              --arg name "${PRODUCT_NAME}" \
+              --arg description "Criado automaticamente a partir do repositório ${REPO_FULL}" \
+              --argjson product_type ${DEFECTDOJO_PRODUCT_TYPE_ID:-1} \
+              '{name:$name, description:$description, product_type:$product_type}')
+            product_id=$(curl -sS -X POST "${BASE_URL}/api/v2/products/" \
+              -H "${AUTH_HEADER}" \
+              -H "Content-Type: application/json" \
+              -d "${product_payload}" | jq '.id')
+          fi
+
+          engagement_resp=$(curl -sS -G "${BASE_URL}/api/v2/engagements/" \
+            --data-urlencode "product=${product_id}" \
+            -H "${AUTH_HEADER}")
+          engagement_id=$(echo "${engagement_resp}" | jq '.results[] | select(.product == '"${product_id}"' and .name == "'"${ENGAGEMENT_NAME}"'") | .id' | head -n 1)
+
+          if [[ -z "${engagement_id}" ]]; then
+            engagement_payload=$(jq -n \
+              --arg name "${ENGAGEMENT_NAME}" \
+              --arg status "In Progress" \
+              --arg target_start "${TARGET_START}" \
+              --arg target_end "${TARGET_END}" \
+              --arg engagement_type "CI/CD" \
+              --arg description "Engagement de CI/CD criado automaticamente" \
+              --argjson product "${product_id}" \
+              '{name:$name, product:$product, status:$status, target_start:$target_start, target_end:$target_end, engagement_type:$engagement_type, description:$description, deduplication_on_engagement:true, close_old_findings:true}')
+            engagement_id=$(curl -sS -X POST "${BASE_URL}/api/v2/engagements/" \
+              -H "${AUTH_HEADER}" \
+              -H "Content-Type: application/json" \
+              -d "${engagement_payload}" | jq '.id')
+          else
+            update_payload=$(jq -n --arg target_end "${TARGET_END}" '{target_end:$target_end}')
+            curl -sS -X PATCH "${BASE_URL}/api/v2/engagements/${engagement_id}/" \
+              -H "${AUTH_HEADER}" \
+              -H "Content-Type: application/json" \
+              -d "${update_payload}" >/dev/null
+          fi
+
+          tests_resp=$(curl -sS -G "${BASE_URL}/api/v2/tests/" \
+            --data-urlencode "engagement=${engagement_id}" \
+            -H "${AUTH_HEADER}")
+          sca_test_id=$(echo "${tests_resp}" | jq '.results[] | select(.title == "'"${SCA_TEST_TITLE}"'") | .id' | head -n 1)
+          sbom_test_id=$(echo "${tests_resp}" | jq '.results[] | select(.title == "'"${SBOM_TEST_TITLE}"'") | .id' | head -n 1)
+
+          {
+            echo "product_id=${product_id}"
+            echo "engagement_id=${engagement_id}"
+            echo "sca_test_title=${SCA_TEST_TITLE}"
+            echo "sbom_test_title=${SBOM_TEST_TITLE}"
+            if [[ -n "${sca_test_id}" ]]; then
+              echo "sca_test_id=${sca_test_id}"
+            fi
+            if [[ -n "${sbom_test_id}" ]]; then
+              echo "sbom_test_id=${sbom_test_id}"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publicar resumo
+        if: ${{ always() && inputs['publish-summary'] }}
         env:
           SUMMARY_TITLE: ${{ inputs['summary-title'] }}
+        run: |
+          if [[ -f trivy-sca-summary.md ]]; then
+            cat trivy-sca-summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ${SUMMARY_TITLE}" >> "$GITHUB_STEP_SUMMARY"
+            echo "Resumo não disponível." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Avaliar vulnerabilidades
         id: analyze-findings
         run: |
-          findings=$(jq '[.runs[].results[]] | length' "${TRIVY_RESULTS_FILE}")
+          findings=$(jq '[.Results[]?.Vulnerabilities[]?] | length' "${TRIVY_JSON_FILE}")
           echo "count=$findings" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Trivy SCA para DefectDojo
+        if: ${{ always() }}
+        env:
+          DEFECTDOJO_BASE_URL: http://18.210.28.169:8080
+          DEFECTDOJO_TOKEN: 75e7a2b85f58f48ea3eee1c72a28a492d36f6c00
+        run: |
+          if [[ ! -s "${TRIVY_JSON_FILE}" ]]; then
+            echo "Arquivo ${TRIVY_JSON_FILE} não encontrado ou vazio; pulando upload.";
+            exit 0
+          fi
+
+          BASE_URL="${DEFECTDOJO_BASE_URL}"
+          AUTH_HEADER="Authorization: Token ${DEFECTDOJO_TOKEN}"
+          ENGAGEMENT_ID="${{ steps.dojo-setup.outputs.engagement_id }}"
+          TEST_ID="${{ steps.dojo-setup.outputs.sca_test_id }}"
+          TEST_TITLE="${{ steps.dojo-setup.outputs.sca_test_title }}"
+          SCAN_DATE=$(date -u +"%Y-%m-%d")
+          SCAN_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          if [[ -n "${TEST_ID}" ]]; then
+            curl -sS -X POST "${BASE_URL}/api/v2/reimport-scan/" \
+              -H "${AUTH_HEADER}" \
+              -F "scan_type=Trivy Scan" \
+              -F "test=${TEST_ID}" \
+              -F "close_old_findings=true" \
+              -F "minimum_severity=Low" \
+              -F "scan_date=${SCAN_DATE}" \
+              -F "version=${SCAN_TIMESTAMP}" \
+              -F "file=@${TRIVY_JSON_FILE};type=application/json"
+          else
+            curl -sS -X POST "${BASE_URL}/api/v2/import-scan/" \
+              -H "${AUTH_HEADER}" \
+              -F "scan_type=Trivy Scan" \
+              -F "engagement=${ENGAGEMENT_ID}" \
+              -F "active=true" \
+              -F "verified=false" \
+              -F "test_title=${TEST_TITLE}" \
+              -F "minimum_severity=Low" \
+              -F "close_old_findings=true" \
+              -F "deduplication_on_engagement=true" \
+              -F "scan_date=${SCAN_DATE}" \
+              -F "version=${SCAN_TIMESTAMP}" \
+              -F "file=@${TRIVY_JSON_FILE};type=application/json"
+          fi
+
+      - name: Upload SBOM para DefectDojo
+        if: ${{ always() && inputs['include-sbom'] }}
+        env:
+          DEFECTDOJO_BASE_URL: http://18.210.28.169:8080
+          DEFECTDOJO_TOKEN: 75e7a2b85f58f48ea3eee1c72a28a492d36f6c00
+        run: |
+          if [[ ! -s "${SBOM_CYCLONEDX_FILE}" ]]; then
+            echo "SBOM CycloneDX não encontrado; pulando upload.";
+            exit 0
+          fi
+
+          BASE_URL="${DEFECTDOJO_BASE_URL}"
+          AUTH_HEADER="Authorization: Token ${DEFECTDOJO_TOKEN}"
+          ENGAGEMENT_ID="${{ steps.dojo-setup.outputs.engagement_id }}"
+          TEST_ID="${{ steps.dojo-setup.outputs.sbom_test_id }}"
+          TEST_TITLE="${{ steps.dojo-setup.outputs.sbom_test_title }}"
+          SCAN_DATE=$(date -u +"%Y-%m-%d")
+          SCAN_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          if [[ -n "${TEST_ID}" ]]; then
+            curl -sS -X POST "${BASE_URL}/api/v2/reimport-scan/" \
+              -H "${AUTH_HEADER}" \
+              -F "scan_type=CycloneDX JSON" \
+              -F "test=${TEST_ID}" \
+              -F "close_old_findings=true" \
+              -F "minimum_severity=Informational" \
+              -F "scan_date=${SCAN_DATE}" \
+              -F "version=${SCAN_TIMESTAMP}" \
+              -F "file=@${SBOM_CYCLONEDX_FILE};type=application/json"
+          else
+            curl -sS -X POST "${BASE_URL}/api/v2/import-scan/" \
+              -H "${AUTH_HEADER}" \
+              -F "scan_type=CycloneDX JSON" \
+              -F "engagement=${ENGAGEMENT_ID}" \
+              -F "active=true" \
+              -F "verified=false" \
+              -F "test_title=${TEST_TITLE}" \
+              -F "minimum_severity=Informational" \
+              -F "close_old_findings=true" \
+              -F "deduplication_on_engagement=true" \
+              -F "scan_date=${SCAN_DATE}" \
+              -F "version=${SCAN_TIMESTAMP}" \
+              -F "file=@${SBOM_CYCLONEDX_FILE};type=application/json"
+          fi
 
       - name: Comentário no PR
         if: ${{ always() && inputs['pr-report'] && github.event_name == 'pull_request' }}
-        uses: domstolene/trivy-pr-report@v1
+        uses: actions/github-script@v7
         with:
-          github_token: ${{ secrets.github-token || github.token }}
-          trivy_report: ${{ env.TRIVY_TABLE_FILE }}
-          fail_on_severity: ${{ inputs['fail-on-severity'] }}
+          github-token: ${{ secrets.github-token || github.token }}
+          script: |
+            const fs = require('fs');
+            const core = require('@actions/core');
+            const path = 'trivy-sca-summary.md';
+            if (!fs.existsSync(path)) {
+              core.info('Resumo do Trivy SCA não encontrado; comentário não será criado.');
+              return;
+            }
+            const body = fs.readFileSync(path, 'utf8');
+            const header = '<!-- trivy-sca-report -->';
+            const finalBody = `${header}\n${body}`;
+            const comments = await github.rest.issues.listComments({
+              ...context.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.data.find(c => c.body && c.body.startsWith(header));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                ...context.repo,
+                comment_id: existing.id,
+                body: finalBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: context.issue.number,
+                body: finalBody,
+              });
+            }
 
       - name: Falhar se vulnerabilidades encontradas
         if: ${{ inputs['exit-on-vulnerability'] && steps.analyze-findings.outputs.count != '0' }}
