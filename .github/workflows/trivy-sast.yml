@@ -149,7 +149,7 @@ jobs:
         if: ${{ always() }}
         id: dojo-setup
         env:
-          DEFECTDOJO_BASE_URL: http://18.212.206.175:8080
+          DEFECTDOJO_BASE_URL: http://18.210.28.169:8080
           DEFECTDOJO_TOKEN: 75e7a2b85f58f48ea3eee1c72a28a492d36f6c00
           DEFECTDOJO_PRODUCT_TYPE_ID: 1
         run: |
@@ -236,7 +236,7 @@ jobs:
       - name: Upload Trivy SAST para DefectDojo
         if: ${{ always() }}
         env:
-          DEFECTDOJO_BASE_URL: http://18.212.206.175:8080
+          DEFECTDOJO_BASE_URL: http://18.210.28.169:8080
           DEFECTDOJO_TOKEN: 75e7a2b85f58f48ea3eee1c72a28a492d36f6c00
         run: |
           if [[ ! -s trivy-sast.json ]]; then
