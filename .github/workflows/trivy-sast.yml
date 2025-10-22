@@ -145,25 +145,139 @@ jobs:
           hide-progress: ${{ inputs['hide-progress'] && 'true' || 'false' }}
           exit-code: 0
 
+      - name: Preparar recursos no DefectDojo
+        if: ${{ always() }}
+        id: dojo-setup
+        env:
+          DEFECTDOJO_BASE_URL: http://18.212.206.175:8080
+          DEFECTDOJO_TOKEN: 75e7a2b85f58f48ea3eee1c72a28a492d36f6c00
+          DEFECTDOJO_PRODUCT_TYPE_ID: 1
+        run: |
+          set -euo pipefail
+
+          AUTH_HEADER="Authorization: Token ${DEFECTDOJO_TOKEN}"
+          BASE_URL="${DEFECTDOJO_BASE_URL}"
+          REPO_FULL="${GITHUB_REPOSITORY}"
+          REPO_NAME="${REPO_FULL#*/}"
+          PRODUCT_NAME="${REPO_FULL}"
+          ENGAGEMENT_NAME="CI/CD - ${REPO_NAME}"
+          TEST_TITLE="Trivy SAST (GitHub Actions)"
+          TARGET_START=$(date -u +"%Y-%m-%d")
+          TARGET_END=$(date -u -d "+7 days" +"%Y-%m-%d")
+
+          echo "Buscando produto '${PRODUCT_NAME}'"
+          product_resp=$(curl -sS -G "${BASE_URL}/api/v2/products/" \
+            --data-urlencode "name=${PRODUCT_NAME}" \
+            -H "${AUTH_HEADER}")
+          product_id=$(echo "${product_resp}" | jq '.results[] | select(.name == "'"${PRODUCT_NAME}"'") | .id' | head -n 1)
+
+          if [[ -z "${product_id}" ]]; then
+            echo "Criando produto '${PRODUCT_NAME}'"
+            product_payload=$(jq -n \
+              --arg name "${PRODUCT_NAME}" \
+              --arg description "Criado automaticamente a partir do repositório ${REPO_FULL}" \
+              --argjson product_type ${DEFECTDOJO_PRODUCT_TYPE_ID:-1} \
+              '{name: $name, description: $description, product_type: $product_type}')
+            product_id=$(curl -sS -X POST "${BASE_URL}/api/v2/products/" \
+              -H "${AUTH_HEADER}" \
+              -H "Content-Type: application/json" \
+              -d "${product_payload}" | jq '.id')
+          else
+            echo "Produto existente (id=${product_id})"
+          fi
+
+          echo "Buscando engagement '${ENGAGEMENT_NAME}'"
+          engagement_resp=$(curl -sS -G "${BASE_URL}/api/v2/engagements/" \
+            --data-urlencode "product=${product_id}" \
+            --data-urlencode "name=${ENGAGEMENT_NAME}" \
+            -H "${AUTH_HEADER}")
+          engagement_id=$(echo "${engagement_resp}" | jq '.results[] | select(.name == "'"${ENGAGEMENT_NAME}"'") | .id' | head -n 1)
+
+          if [[ -z "${engagement_id}" ]]; then
+            echo "Criando engagement '${ENGAGEMENT_NAME}'"
+            engagement_payload=$(jq -n \
+              --arg name "${ENGAGEMENT_NAME}" \
+              --arg status "In Progress" \
+              --arg target_start "${TARGET_START}" \
+              --arg target_end "${TARGET_END}" \
+              --arg engagement_type "CI/CD" \
+              --arg description "Engagement de CI/CD criado automaticamente" \
+              --argjson product "${product_id}" \
+              '{name:$name, product:$product, status:$status, target_start:$target_start, target_end:$target_end, engagement_type:$engagement_type, description:$description, deduplication_on_engagement:true, close_old_findings:true}')
+            engagement_id=$(curl -sS -X POST "${BASE_URL}/api/v2/engagements/" \
+              -H "${AUTH_HEADER}" \
+              -H "Content-Type: application/json" \
+              -d "${engagement_payload}" | jq '.id')
+          else
+            echo "Engagement existente (id=${engagement_id}), atualizando target_end para ${TARGET_END}"
+            update_payload=$(jq -n --arg target_end "${TARGET_END}" '{target_end:$target_end}')
+            curl -sS -X PATCH "${BASE_URL}/api/v2/engagements/${engagement_id}/" \
+              -H "${AUTH_HEADER}" \
+              -H "Content-Type: application/json" \
+              -d "${update_payload}" >/dev/null
+          fi
+
+          echo "Buscando Test '${TEST_TITLE}'"
+          test_resp=$(curl -sS -G "${BASE_URL}/api/v2/tests/" \
+            --data-urlencode "engagement=${engagement_id}" \
+            --data-urlencode "title=${TEST_TITLE}" \
+            -H "${AUTH_HEADER}")
+          test_id=$(echo "${test_resp}" | jq '.results[] | select(.title == "'"${TEST_TITLE}"'") | .id' | head -n 1)
+
+          {
+            echo "product_id=${product_id}"
+            echo "engagement_id=${engagement_id}"
+            echo "test_title=${TEST_TITLE}"
+            if [[ -n "${test_id}" ]]; then
+              echo "test_id=${test_id}"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
       - name: Upload Trivy SAST para DefectDojo
         if: ${{ always() }}
         env:
+          DEFECTDOJO_BASE_URL: http://18.212.206.175:8080
           DEFECTDOJO_TOKEN: 75e7a2b85f58f48ea3eee1c72a28a492d36f6c00
         run: |
-          if [[ -s trivy-sast.json ]]; then
-            curl -sS -X POST "http://18.210.28.169:8080/api/v2/import-scan/" \
-              -H "Authorization: Token ${DEFECTDOJO_TOKEN}" \
+          if [[ ! -s trivy-sast.json ]]; then
+            echo "Arquivo trivy-sast.json não encontrado ou vazio; pulando upload."
+            exit 0
+          fi
+
+          BASE_URL="${DEFECTDOJO_BASE_URL}"
+          AUTH_HEADER="Authorization: Token ${DEFECTDOJO_TOKEN}"
+          ENGAGEMENT_ID="${{ steps.dojo-setup.outputs.engagement_id }}"
+          TEST_ID="${{ steps.dojo-setup.outputs.test_id }}"
+          TEST_TITLE="${{ steps.dojo-setup.outputs.test_title }}"
+          SCAN_DATE=$(date -u +"%Y-%m-%d")
+          SCAN_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          if [[ -n "${TEST_ID}" ]]; then
+            echo "Reimportando scan no Test ID ${TEST_ID}"
+            curl -sS -X POST "${BASE_URL}/api/v2/reimport-scan/" \
+              -H "${AUTH_HEADER}" \
               -F "scan_type=Trivy Scan" \
-              -F "engagement=1" \
-              -F "lead=1" \
-              -F "active=true" \
-              -F "verified=false" \
-              -F "test_title=Trivy SAST (GitHub Actions)" \
+              -F "test=${TEST_ID}" \
+              -F "close_old_findings=true" \
               -F "minimum_severity=Low" \
-              -F "close_old_findings=false" \
+              -F "scan_date=${SCAN_DATE}" \
+              -F "version=${SCAN_TIMESTAMP}" \
               -F "file=@trivy-sast.json;type=application/json"
           else
-            echo "Arquivo trivy-sast.json não encontrado ou vazio; pulando upload."
+            echo "Nenhum Test encontrado, realizando import-scan para engajamento ${ENGAGEMENT_ID}"
+            curl -sS -X POST "${BASE_URL}/api/v2/import-scan/" \
+              -H "${AUTH_HEADER}" \
+              -F "scan_type=Trivy Scan" \
+              -F "engagement=${ENGAGEMENT_ID}" \
+              -F "active=true" \
+              -F "verified=false" \
+              -F "test_title=${TEST_TITLE}" \
+              -F "minimum_severity=Low" \
+              -F "close_old_findings=true" \
+              -F "deduplication_on_engagement=true" \
+              -F "scan_date=${SCAN_DATE}" \
+              -F "version=${SCAN_TIMESTAMP}" \
+              -F "file=@trivy-sast.json;type=application/json"
           fi
 
       - name: Upload SARIF
